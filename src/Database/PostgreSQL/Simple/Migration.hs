@@ -62,7 +62,7 @@ import           Database.PostgreSQL.Simple ( Connection
 import           Database.PostgreSQL.Simple.FromRow (FromRow (..), field)
 import           Database.PostgreSQL.Simple.ToField (ToField (..))
 import           Database.PostgreSQL.Simple.ToRow (ToRow (..))
-import           Database.PostgreSQL.Simple.Types (Query (..))
+import           Database.PostgreSQL.Simple.Types (Query (..), Identifier)
 import           Database.PostgreSQL.Simple.Util (existsTable)
 import           System.Directory (listDirectory)
 import           System.FilePath ((</>))
@@ -176,22 +176,24 @@ executeMigration con opts name contents = doStepTransaction opts con $ do
       when (verbose opts) $ optLogWriter opts $ Right ("Executing:\t" <> fromString name)
       void $ execute_ con (Query contents)
       when (verbose opts) $ optLogWriter opts $ Right ("Adding '" <> fromString name <> "' to schema_migrations with checksum '" <> fromString (show checksum) <> "'")
-      void $ execute con q (name, checksum)
+      void $ execute con q (migrationsTableName opts, name, checksum)
       when (verbose opts) $ optLogWriter opts $ Right ("Executed:\t" <> fromString name)
       pure MigrationSuccess
     ScriptModified eva -> do
       when (verbose opts) $ optLogWriter opts $ Left ("Fail:\t" <> fromString name <> "\n" <> scriptModifiedErrorMessage eva)
       pure (MigrationError name)
   where
-    q = "insert into " <> Query (optTableName opts) <> "(filename, checksum) values(?, ?)"
+    q = "insert into ? (filename, checksum) values(?, ?)"
 
 -- | Initializes the database schema with a helper table containing
 -- meta-information about executed migrations.
 initializeSchema :: Connection -> MigrationOptions -> IO ()
 initializeSchema con opts = do
   when (verbose opts) $ optLogWriter opts $ Right "Initializing schema"
-  void . doStepTransaction opts con . execute_ con $ mconcat
-      [ "create table if not exists " <> Query (optTableName opts) <> " "
+  void . doStepTransaction opts con $ execute con q (Only $ migrationsTableName opts)
+  where
+    q = mconcat
+      [ "create table if not exists ? "
       , "( filename varchar(512) not null"
       , ", checksum varchar(32) not null"
       , ", executed_at timestamp without time zone not null default now() "
@@ -252,7 +254,7 @@ executeValidation con opts cmd = doStepTransaction opts con $
 -- will be executed and its meta-information will be recorded.
 checkScript :: Connection -> MigrationOptions -> ScriptName -> Checksum -> IO CheckScriptResult
 checkScript con opts name fileChecksum =
-  query con q (Only name) >>= \case
+  query con q (migrationsTableName opts, name) >>= \case
     [] ->
       pure ScriptNotExecuted
     Only dbChecksum:_ | fileChecksum == dbChecksum ->
@@ -261,7 +263,7 @@ checkScript con opts name fileChecksum =
       pure $ ScriptModified (ExpectedVsActual {evaExpected = dbChecksum, evaActual = fileChecksum})
   where
     q = mconcat
-        [ "select checksum from " <> Query (optTableName opts) <> " "
+        [ "select checksum from ? "
         , "where filename = ? limit 1"
         ]
 
@@ -372,6 +374,11 @@ defaultOptions =
     , optLogWriter = either (T.hPutStrLn stderr) T.putStrLn
     , optTransactionControl = TransactionPerRun
     }
+
+-- Wrap the name of the table that stores migrations into Identifier,
+-- to ensure it's properly escaped (prevent SQL injection via optTableName)
+migrationsTableName :: MigrationOptions -> Identifier
+migrationsTableName = fromString . BS8.unpack . optTableName
 
 verbose :: MigrationOptions -> Bool
 verbose o = optVerbose o == Verbose

@@ -13,6 +13,7 @@
 
 module Database.PostgreSQL.Simple.TransactionPerStepTest where
 
+import           Data.Foldable                        (traverse_)
 import           Database.PostgreSQL.Simple           (Connection, execute_)
 import           Database.PostgreSQL.Simple.Migration (MigrationCommand (..),
                                                        MigrationOptions (..),
@@ -22,7 +23,7 @@ import           Database.PostgreSQL.Simple.Migration (MigrationCommand (..),
                                                        runMigrations,
                                                        defaultOptions)
 import           Database.PostgreSQL.Simple.Util      (existsTable)
-import           Test.Hspec                           (Spec, describe, it, shouldBe, shouldThrow, anyException, afterAll_)
+import           Test.Hspec                           (Spec, describe, it, shouldBe, shouldThrow, shouldReturn, anyException, afterAll_)
 
 migrationSpec :: Connection -> Spec
 migrationSpec con = afterAll_ cleanup $ describe "Migrations" $ do
@@ -61,15 +62,19 @@ migrationSpec con = afterAll_ cleanup $ describe "Migrations" $ do
     r <- existsTable con "trn2"
     r `shouldBe` True
 
+  it "does not allow SQL injection via table name option" $ do
+    let opts = defaultOptions{optTableName = "tricked_you (gotcha int); --"}
+    runMigrations con opts [MigrationInitialization] `shouldReturn` MigrationSuccess
+    existsTable con "tricked_you" `shouldReturn` False
+    existsTable con "tricked_you (gotcha int); --" `shouldReturn` True
 
   where
     runMigration' =
       runMigration con defaultOptions{optTransactionControl = NoNewTransaction}
 
-    -- Cleanup
-    cleanup = do
-      _ <- execute_ con "drop table if exists trn2"
-      _ <- execute_ con "drop table if exists schema_migrations"
-      pure ()
-
-
+    cleanup =
+      traverse_ (execute_ con)
+        [ "drop table if exists trn2"
+        , "drop table if exists schema_migrations"
+        , "drop table if exists \"tricked_you (gotcha int); --\""
+        ]
